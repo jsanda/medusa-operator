@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - master
+      - protoc-fix-debug
 
   pull_request:
     branches: [ master ]
