@@ -21,6 +21,9 @@ jobs:
         with:
           go-version: ^1.15
         id: go
+      
+      - name: Setup Protoc
+        uses: arduino/setup-protoc@v1
 
       - name: Check out code into the Go module directory
         uses: actions/checkout@v2
