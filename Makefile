@@ -87,7 +87,7 @@ generate: protobuf-code-gen controller-gen
 
 PHONY: protobuf-code-gen
 protobuf-code-gen:
-	@protoc -I pkg/pb pkg/pb/medusa.proto --go_out=plugins=grpc:pkg/pb
+	@protoc --go_out=. --go_opt=paths=source_relative --go-grpc_out=. --go-grpc_opt=paths=source_relative pkg/pb/medusa.proto
 
 # Build the docker image
 docker-build:
