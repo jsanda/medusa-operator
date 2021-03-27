@@ -6993,8 +6993,6 @@ spec:
             startTime:
               format: date-time
               type: string
-          required:
-          - cassdcTemplateSpec
           type: object
       type: object
   version: v1alpha1

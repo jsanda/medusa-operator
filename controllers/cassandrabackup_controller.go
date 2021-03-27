@@ -33,6 +33,7 @@ import (
 
 	cassdcapi "github.com/datastax/cass-operator/operator/pkg/apis/cassandra/v1beta1"
 	api "github.com/k8ssandra/medusa-operator/api/v1alpha1"
+	"github.com/k8ssandra/medusa-operator/pkg/status"
 	operrors "github.com/k8ssandra/medusa-operator/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
 )
@@ -49,6 +50,7 @@ type CassandraBackupReconciler struct {
 	Log    logr.Logger
 	Scheme *runtime.Scheme
 	medusa.ClientFactory
+	StatusUpdater *status.BackupStatusUpdater
 }
 
 // +kubebuilder:rbac:groups=cassandra.k8ssandra.io,namespace="medusa-operator",resources=cassandrabackups,verbs=get;list;watch;create;update;patch;delete
@@ -71,6 +73,13 @@ func (r *CassandraBackupReconciler) Reconcile(req ctrl.Request) (ctrl.Result, er
 
 	backup := instance.DeepCopy()
 
+	defer r.Log.Info("finished reconciliation")
+
+	r.Log.Info("starting reconciliation",
+		"ResourceVersion", backup.ResourceVersion,
+		"StartTime", backup.Status.StartTime,
+		"InProgress", backup.Status.InProgress)
+
 	// Verify the CassandraBackup has a finalizer
 	if !ctrlutil.ContainsFinalizer(backup, finalizerName) {
 		ctrlutil.AddFinalizer(backup, finalizerName)
@@ -88,7 +97,7 @@ func (r *CassandraBackupReconciler) Reconcile(req ctrl.Request) (ctrl.Result, er
 		}
 		if ctrlutil.ContainsFinalizer(backup, finalizerName) {
 			r.Log.Info("Deletion of CassandraBackup started", "Backup", req.NamespacedName)
-			patch := client.MergeFrom(backup.DeepCopy())
+			patch := client.MergeFromWithOptions(backup.DeepCopy(), client.MergeFromWithOptimisticLock{})
 			backup.Status.DeletionInProgress = true
 
 			if err := r.Status().Patch(context.Background(), backup, patch); err != nil {
@@ -102,7 +111,7 @@ func (r *CassandraBackupReconciler) Reconcile(req ctrl.Request) (ctrl.Result, er
 				err = r.removeBackup(ctx, backup)
 				if err != nil {
 					r.Log.Error(err, "failed to remove backup", "Backup", req.NamespacedName)
-					patch := client.MergeFrom(backup.DeepCopy())
+					patch := client.MergeFromWithOptions(backup.DeepCopy(), client.MergeFromWithOptimisticLock{})
 					backup.Status.DeletionInProgress = false
 					if err := r.Status().Patch(context.Background(), backup, patch); err != nil {
 						r.Log.Error(err, "failed to patch status for deletion retry", "Backup", req.NamespacedName)
@@ -141,7 +150,7 @@ func (r *CassandraBackupReconciler) Reconcile(req ctrl.Request) (ctrl.Result, er
 		// Set the finish time
 		// Note that the time here is not accurate, but that is ok. For now we are just
 		// using it as a completion marker.
-		patch := client.MergeFrom(backup.DeepCopy())
+		patch := client.MergeFromWithOptions(backup.DeepCopy(), client.MergeFromWithOptimisticLock{})
 		backup.Status.FinishTime = metav1.Now()
 		if err := r.Status().Patch(context.Background(), backup, patch); err != nil {
 			r.Log.Error(err, "failed to patch status with finish time")
@@ -153,6 +162,11 @@ func (r *CassandraBackupReconciler) Reconcile(req ctrl.Request) (ctrl.Result, er
 
 	return r.createBackup(ctx, backup)
 }
+
+//func (r *CassandraBackupReconciler) patch(backup *api.CassandraBackup) (error) {
+//	patch := client.MergeFrom(backup.DeepCopy())
+//	backup.Status.InProgress
+//}
 
 func (r *CassandraBackupReconciler) createBackup(ctx context.Context, backup *api.CassandraBackup) (ctrl.Result, error) {
 	cassdcKey := types.NamespacedName{Namespace: backup.Namespace, Name: backup.Spec.CassandraDatacenter}
@@ -180,7 +194,7 @@ func (r *CassandraBackupReconciler) createBackup(ctx context.Context, backup *ap
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, operrors.BackupSidecarNotFound
 	}
 
-	patch := client.MergeFrom(backup.DeepCopy())
+	patch := client.MergeFromWithOptions(backup.DeepCopy(), client.MergeFromWithOptimisticLock{})
 	backup.Status.StartTime = metav1.Now()
 	for _, pod := range pods {
 		backup.Status.InProgress = append(backup.Status.InProgress, pod.Name)
@@ -190,27 +204,22 @@ func (r *CassandraBackupReconciler) createBackup(ctx context.Context, backup *ap
 		return ctrl.Result{Requeue: true, RequeueAfter: 5 * time.Second}, err
 	}
 
+	r.Log.Info("starting backup",
+		"ResourceVersion", backup.ResourceVersion,
+		"StartTime", backup.Status.StartTime,
+		"InProgress", backup.Status.InProgress)
+
 	for _, p := range pods {
 		pod := p
 		backup := backup.DeepCopy()
 		go func() {
 			r.Log.Info("starting backup", "CassandraPod", pod.Name)
-			succeeded := false
 			if err := doBackup(ctx, backup.Spec.Name, &pod, r.ClientFactory); err == nil {
 				r.Log.Info("finished backup", "CassandraPod", pod.Name)
-				succeeded = true
+				r.StatusUpdater.SetFinished(backup, pod.Name)
 			} else {
 				r.Log.Error(err, "backup failed", "CassandraPod", pod.Name)
-			}
-			patch := client.MergeFrom(backup.DeepCopy())
-			backup.Status.InProgress = removeValue(backup.Status.InProgress, pod.Name)
-			if succeeded {
-				backup.Status.Finished = append(backup.Status.Finished, pod.Name)
-			} else {
-				backup.Status.Failed = append(backup.Status.Failed, pod.Name)
-			}
-			if err := r.Status().Patch(context.Background(), backup, patch); err != nil {
-				r.Log.Error(err, "failed to patch status", "Backup", backup)
+				r.StatusUpdater.SetFailed(backup, pod.Name)
 			}
 		}()
 	}
@@ -295,7 +304,7 @@ func (r *CassandraBackupReconciler) addCassdcSpecToStatus(ctx context.Context, b
 		},
 	}
 
-	patch := client.MergeFrom(backup.DeepCopy())
+	patch := client.MergeFromWithOptions(backup.DeepCopy(), client.MergeFromWithOptimisticLock{})
 	backup.Status.CassdcTemplateSpec = templateSpec
 
 	return r.Status().Patch(ctx, backup, patch)

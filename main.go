@@ -32,6 +32,7 @@ import (
 	cassdcapi "github.com/datastax/cass-operator/operator/pkg/apis/cassandra/v1beta1"
 
 	api "github.com/k8ssandra/medusa-operator/api/v1alpha1"
+	"github.com/k8ssandra/medusa-operator/pkg/status"
 	"github.com/k8ssandra/medusa-operator/controllers"
 	// +kubebuilder:scaffold:imports
 )
@@ -81,11 +82,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	backupStatusUpdater := status.NewBackupStatusUpdater(mgr)
+	if err := mgr.Add(backupStatusUpdater); err != nil {
+		setupLog.Error(err, "failed to add BackupStatusUpdater")
+		os.Exit(1)
+	}
+
 	if err = (&controllers.CassandraBackupReconciler{
 		Client:        mgr.GetClient(),
 		Log:           ctrl.Log.WithName("controllers").WithName("CassandraBackup"),
 		Scheme:        mgr.GetScheme(),
 		ClientFactory: &medusa.DefaultFactory{},
+		StatusUpdater: backupStatusUpdater,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "CassandraBackup")
 		os.Exit(1)

@@ -207,6 +207,10 @@ var _ = Describe("CassandraBackup controller", func() {
 			return len(updated.Status.Finished) > 0
 		}, timeout, interval).Should(BeTrue())
 
+		By("verify status is updated correctly")
+		Expect(k8sClient.Get(context.Background(), backupKey, backup)).To(Succeed())
+		Expect(backup.Status.InProgress).To(BeEmpty(), fmt.Sprintf("InProgress: %s", backup.Status.InProgress))
+
 		By("verify that medusa gRPC clients are invoked")
 		Expect(medusaClientFactory.GetRequestedBackups()).To(Equal(map[string][]string{
 			fmt.Sprintf("%s:%d", getPodIpAddress(0), backupSidecarPort): {backupName},
